@@ -1,0 +1,362 @@
+import numpy as np
+import cv2
+from matplotlib.pyplot import plot as plt
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt 
+from scipy import signal
+from scipy import misc
+import scipy
+
+from matplotlib.pyplot import imread
+
+
+## Loading Image converting into HSV and then applying gaussian filter
+
+
+Image=imread('./images/test1.jpg')
+hsv = cv2.cvtColor(Image, cv2.COLOR_BGR2HSV)
+hsv[:,:,0]=hsv[:,:,0]*2
+hsv[:,:,1]=(hsv[:,:,1]/255)*100
+hsv[:,:,2]=(hsv[:,:,2]/255)*100
+shsv = cv2.GaussianBlur(hsv,(5,5),2)
+
+plt.figure()
+plt.imshow(Image)
+plt.title('RGB')
+plt.show()
+plt.figure()
+plt.imshow(hsv)
+plt.title('HSV')
+plt.show()
+plt.figure()
+plt.imshow(shsv)
+plt.title('Smooth')
+plt.show()
+
+### Selecting white and yellow regions and converting in binary image
+
+
+
+def to_binary(Image):
+    '''
+    A function implemented to select yellow and white regions for lane detection
+    '''
+    
+    Binary=np.ones(Image.shape[:-1],dtype='uint8')*255
+    # Setting the threshold values
+    hl1=190;hu1=230;sl1=30;su1=100;vl1=50;vu1=100
+    hl2=0;hu2=100;sl2=0;su2=20;vl2=50;vu2=70
+
+    Binary[( ( (shsv[:,:,0]>hl1) & (shsv[:,:,0]<hu1) )| ( (shsv[:,:,0]>hl2) &  (shsv[:,:,0]<hu2))) &
+           ( ( (shsv[:,:,1]>sl1) & (shsv[:,:,1]<su1) )| ( (shsv[:,:,1]>sl2) &  (shsv[:,:,1]<su2))) &
+           ( ( (shsv[:,:,2]>vl1) & (shsv[:,:,2]<vu1) )| ( (shsv[:,:,2]>vl2) &  (shsv[:,:,2]<vu2))) ]=0
+    R,C=Binary.shape
+    plt.figure()
+    plt.imshow(Binary)
+    plt.title('Binary')
+    plt.show()
+    return Binary
+
+
+## Binary Image
+
+
+Binary=to_binary(Image)
+R,C=Binary.shape
+
+## Canny Edge Detector
+
+edges = cv2.Canny(Binary,100,250)
+
+plt.figure()
+plt.imshow(edges)
+plt.title('Edges')
+plt.show()
+
+
+### Defining Region of interest
+
+# Creating Masks to define region of interest
+def region(R,C,a,b,c):
+    '''
+    A function to define region of interest
+    '''
+    
+    mask1 = np.fromfunction(lambda i, j: (j-a*i <= C-R )*(i>R//c) , (R, C), dtype=int)
+    mask1=mask1*1
+    mask2 = np.fromfunction(lambda i, j: (i+b*j >= R )*(i>R//c) , (R, C), dtype=int)
+    mask2=mask2*1
+    mask=mask1*mask2
+    plt.figure()
+    plt.imshow(mask)
+    
+    return mask
+
+mask=region(R,C,0.95,0.7,1.8)
+
+plt.figure()
+plt.imshow(mask*edges)
+
+
+### Implementation of  Hough Transform
+
+
+def Accumulator(Binary,bins= 100):
+    '''
+    A function defined to make Accumulator for Hough transform
+    '''
+    # Defining accumulator  
+    A   = np.zeros((bins,bins),dtype='uint')
+    R,C = Binary.shape
+    theta = np.linspace(-np.pi/2,np.pi/2 ,bins)
+    diag_len = np.ceil(np.sqrt(R * R + C * C))   # max_dist
+    P     = np.linspace(-diag_len ,diag_len ,bins)
+    Mbinary=np.zeros((R,C),dtype='uint')
+    Binary=edges*mask
+    R,C=Binary.shape
+
+    Mbinary=Binary/255
+    temp=np.where(Mbinary>0,1,0)
+    x_idxs, y_idxs = np.nonzero(temp)  
+
+    for j in range(len(x_idxs)):
+        x = x_idxs[j]
+        y = y_idxs[j]
+
+        for i,th in enumerate(theta):
+                p = x*Mbinary[x,y]*np.cos(th)+y*Mbinary[x,y]*np.sin(th)
+                idx = (np.abs(P - p)).argmin()
+                A[idx,i]=A[idx,i]+1
+  
+    return A,theta,P
+
+
+A,theta,P=Accumulator(Binary)
+
+## Visualization of Hough transform
+
+plt.imshow(A)
+
+### Thresholding
+
+threshold=800
+A_=np.where(A>threshold,1,0)
+y_idxs, x_idxs = np.nonzero(A_)  
+print(x_idxs)
+
+A.max()
+
+### Removing Horizontal Lines, Converting Lines  polar to cartesian and Thresholding Accumulator
+
+
+
+def to_cartesian(theta,P,x_idxs,y_idxs,lth,rth,A):
+    Lines=np.zeros((R,C),dtype='uint')
+    LGm=[];LGb=[];RGm=[];RGb=[]
+    for j in range(len(x_idxs)):
+
+        th=theta[x_idxs[j]]
+        p=P[y_idxs[j]]
+        b = p/np.sin(th)
+        m = -(np.cos(th)/np.sin(th))
+        X = np.array([i for i in range(R)])
+        # Discarding Lines which are horizontal
+        if  np.abs(m)<0.1:
+            continue
+
+        if ((m<0) and (A[y_idxs[j],x_idxs[j]]>lth)):
+            LGm.append(m)
+            LGb.append(b)
+        
+        if ((m>0) and (A[y_idxs[j],x_idxs[j]]>rth)):
+            RGm.append(m)
+            RGb.append(b)
+
+        Y = np.array([int(m*x+b) for x in X])
+        X_=X[(Y<C) & (Y>0)]
+        Y_=Y[(Y<C) & (Y>0)]
+        Lines[X_,Y_]=1
+    plt.imshow(Lines*mask)
+    plt.title('Hough Lines')
+
+    return LGm,LGb,RGm,RGb
+
+
+LGm,LGb,RGm,RGb=to_cartesian(theta,P,x_idxs,y_idxs,800,1400,A)
+
+## Processing Right Group of  Lines to get Lanes
+#### Applying Linear Regression and finding two lines
+
+
+
+def Preprocess_Right(RGm,RGb):
+    '''
+    A function to preprocess Right lines
+    '''
+    group_means=[]
+    groups=[[]]
+    g_index=[[]]
+    g_bs=[[]]
+
+    ngs=0
+    rgms=[]
+    thm=0.5
+    for i in range(len(RGm)):
+        if i==0:
+            groups[0].append(RGm[i])
+            group_means.append(RGm[i])
+            g_bs[0].append(RGb[i])
+        else:
+            idx = (np.abs(group_means - RGm[i])).argmin()
+            if np.abs(group_means[idx]-RGm[i])<thm:
+                groups[idx].append(RGm[i])
+                g_bs[idx].append(RGb[i])
+                g_index[idx].append(i)
+
+                group_means[idx]=sum(groups[idx])/len(groups[idx])
+            else:
+                groups.append([RGm[i]])
+                g_bs.append([RGb[i]])
+                g_index.append([i])
+                group_means.append(RGm[i])
+                ngs=ngs+1
+
+    f_lines=[]
+    hg=[]
+    thb=100
+    i=0
+    if len(g_bs[0])>1:
+        for j,G_ in enumerate(g_bs):
+            G=G_
+            bmax=max(G)
+            bmin=min(G)
+            if np.abs(bmax-bmin)<thb:
+                f_lines.append([(group_means[j],bmax),(group_means[j],bmin)])
+            else:
+                while((np.abs(bmax-bmin)>thb) and (i<10)):
+                    i=i+1
+                    if np.abs(bmax-bmin)<thb:
+                        f_lines.append([(group_means[j],bmax),(group_means[j],bmin)])
+                        if len(hg)>=2:
+                            f_lines.append([(group_means[j],max(hg)),(group_means[j],min(hg))])
+                        break
+
+                    else:
+                        hg.append(bmin)
+                        G.remove(bmin)
+                        bmax=max(G)
+                        bmin=min(G)
+                        if np.abs(bmax-bmin)<thb:
+                            f_lines.append([(group_means[j],bmax),(group_means[j],bmin)])
+                        if len(hg)>=2:
+                            f_lines.append([(group_means[j],max(hg)),(group_means[j],min(hg))])
+
+    return f_lines
+
+f_lines=Preprocess_Right(RGm,RGb)
+
+## Processing Left Group of  Lines to get Lanes
+#### Applying Linear Regression and finding two lines
+
+def Preprocess_Left(LGm,LGb,f_lines):
+    '''
+    A function to preprocess left lines
+    '''
+    group_means=[]
+    groups=[[]]
+    g_index=[[]]
+    g_bs=[[]]
+
+    ngs=0
+    lgms=[]
+    thm=0.5
+    for i in range(len(LGm)):
+        if i==0:
+            groups[0].append(LGm[i])
+            group_means.append(LGm[i])
+            g_bs[0].append(LGb[i])
+        else:
+            idx = (np.abs(group_means - LGm[i])).argmin()
+            if np.abs(group_means[idx]-LGm[i])<thm:
+                groups[idx].append(LGm[i])
+                g_bs[idx].append(LGb[i])
+                g_index[idx].append(i)
+
+                group_means[idx]=sum(groups[idx])/len(groups[idx])
+            else:
+                groups.append([LGm[i]])
+                g_bs.append([LGb[i]])
+                g_index.append([i])
+                group_means.append(LGm[i])
+                ngs=ngs+1
+
+    hg=[]
+    thb=100
+    i=0
+    if len(g_bs[0])>1:
+        for j,G_ in enumerate(g_bs):
+            G=G_
+            bmax=max(G)
+            bmin=min(G)
+            if np.abs(bmax-bmin)<thb:
+                f_lines.append([(group_means[j],bmax),(group_means[j],bmin)])
+            else:
+                while((np.abs(bmax-bmin)>thb) and (i<10)):
+                    print(np.abs(bmax-bmin))
+                    i=i+1
+                    if np.abs(bmax-bmin)<thb:
+                        f_lines.append([(group_means[j],bmax),(group_means[j],bmin)])
+                        if len(hg)>=2:
+                            f_lines.append([(group_means[j],max(hg)),(group_means[j],min(hg))])
+                        break
+
+                    else:
+                        hg.append(bmin)
+                        G.remove(bmin)
+                        bmax=max(G)
+                        bmin=min(G)
+                        if np.abs(bmax-bmin)<thb:
+                            f_lines.append([(group_means[j],bmax),(group_means[j],bmin)])
+                        if len(hg)>=2:
+                            f_lines.append([(group_means[j],max(hg)),(group_means[j],min(hg))])
+
+    return f_lines
+
+f_lines=Preprocess_Left(LGm,LGb,f_lines)
+
+
+def Highlight_Lanes(Image,f_lines,R,C,mask):
+    maskf=np.zeros((R, C))
+    for f in (f_lines):
+        mask1f = np.fromfunction(lambda i, j: (j <= np.round(f[0][0]*i+f[0][1]) ), (R, C), dtype=int)
+        mask1f=mask1f*1
+        mask2f = np.fromfunction(lambda i, j: (j >= np.round(f[1][0]*i+f[1][1])) , (R, C), dtype=int)
+        mask2f=mask2f*1
+        maskf_=mask1f*mask2f
+        maskf=maskf+maskf_
+    h_image=Image.copy()
+    h_image[:,:,0]=h_image[:,:,0]+mask*maskf*100
+    h_image[:,:,1]=h_image[:,:,1]-h_image[:,:,1]*mask*maskf
+    h_image[:,:,2]=h_image[:,:,2]-h_image[:,:,2]*mask*maskf
+    plt.figure()
+    plt.imshow(h_image)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
